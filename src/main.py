@@ -38,6 +38,6 @@ for audio_path in audio_paths:
             last_segment = segment.text
         text = "".join(text_segments)
 
-        with open(f"{TEXT_OUT_DIR}/T{audio_file_number}_.md", "w") as file:
+        with open(f"{TEXT_OUT_DIR}/T{audio_file_number}.md", "w") as file:
             file.write(text)
 print("\nDone!")
