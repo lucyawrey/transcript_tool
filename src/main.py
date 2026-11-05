@@ -7,6 +7,7 @@ import sys
 import tempfile
 from datetime import datetime
 from array import array
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ SAMPLE_RATE = 16000
 TARGET_PEAK_DB = -1.0
 MAX_PIECE_SECONDS = 20 * 60
 UNTITLED_PATTERN = re.compile(r"^T(\d+)\.md$")
+RETRANSCRIBED_PATTERN = re.compile(r"^T\d+ \(retranscribed( \d+)?\)\.md$")
 FORBIDDEN_IN_NAMES = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f\x7f]')
 TITLE_WORDS = 1500
 MIN_WORDS_TO_TITLE = 5
@@ -37,7 +39,7 @@ class Config:
     notes_dir: Path
     model_path: Path
     pause_seconds: float
-    title_model_path: Path | None = None
+    title_model_path: Path | None
 
 
 @dataclass
@@ -48,9 +50,8 @@ class Job:
 
 
 def load_config():
-    env = os.environ
     def required_dir(key):
-        value = env.get(key)
+        value = os.environ.get(key)
         if not value:
             raise ConfigError(f"{key} is not set in .env")
         path = Path(value).expanduser()
@@ -62,16 +63,16 @@ def load_config():
     notes_dir = required_dir("TEXT_OUT_DIR")
     if not os.access(notes_dir, os.W_OK):
         raise ConfigError(f"TEXT_OUT_DIR is not writable: {notes_dir}")
-    model = env.get("MODEL_PATH")
+    model = os.environ.get("MODEL_PATH")
     if not model:
         raise ConfigError("MODEL_PATH is not set in .env")
     try:
-        pause = float(env.get("PARAGRAPH_PAUSE_SECONDS") or 3)
+        pause = float(os.environ.get("PARAGRAPH_PAUSE_SECONDS") or 3)
     except ValueError:
         raise ConfigError("PARAGRAPH_PAUSE_SECONDS must be a number of seconds")
     if shutil.which("ffmpeg") is None:
         raise ConfigError("ffmpeg is not installed or not on the PATH")
-    title_model = env.get("TITLE_MODEL_PATH")
+    title_model = os.environ.get("TITLE_MODEL_PATH")
     title_model_path = REPO_DIR / Path(title_model).expanduser() if title_model else None
     if title_model_path and not title_model_path.is_file():
         raise ConfigError(f"TITLE_MODEL_PATH is not a file: {title_model_path}")
@@ -207,16 +208,13 @@ def transcribe(session, pcm, pause_seconds):
 
 
 def untitled_notes(note_names, recordings):
-    numbered = [name for name in note_names if file_number(name) is not None]
-    counts = {}
-    for name in numbered:
-        counts[file_number(name)] = counts.get(file_number(name), 0) + 1
-    untitled = []
-    for name in sorted(numbered, key=file_number):
-        match = UNTITLED_PATTERN.match(name)
-        if match and int(match.group(1)) in recordings and counts[int(match.group(1))] == 1:
-            untitled.append(name)
-    return untitled
+    hand_named = Counter(file_number(name) for name in note_names
+                         if file_number(name) is not None
+                         and not UNTITLED_PATTERN.match(name) and not RETRANSCRIBED_PATTERN.match(name))
+    bare = sorted((int(match.group(1)), name) for name in note_names if (match := UNTITLED_PATTERN.match(name)))
+    untitled = [name for number, name in bare if number in recordings and not hand_named[number]]
+    missing = [name for number, name in bare if number not in recordings]
+    return untitled, missing
 
 
 def ordinal(day):
@@ -234,7 +232,8 @@ def clean_title(raw):
     title = FORBIDDEN_IN_NAMES.sub(" ", lines[0] if lines else "")
     title = " ".join(title.split()).strip(" .'\u201c\u201d\u2018\u2019")
     if len(title) > MAX_TITLE_CHARS:
-        title = title[:MAX_TITLE_CHARS + 1].rsplit(" ", 1)[0].rstrip(" .")
+        cut = title[:MAX_TITLE_CHARS + 1]
+        title = (cut.rsplit(" ", 1)[0] if " " in cut else cut[:MAX_TITLE_CHARS]).rstrip(" .")
     return title
 
 
@@ -277,7 +276,9 @@ def load_titler(model_path):
 
 
 def title_untitled_notes(config, recordings):
-    names = untitled_notes([p.name for p in config.notes_dir.glob("*.md")], recordings)
+    names, missing = untitled_notes([p.name for p in config.notes_dir.glob("*.md")], recordings)
+    for name in missing:
+        print(f"Left {name} untitled: its recording isn't in AUDIO_IN_DIR, so its date is unknown")
     if not names:
         return
     try:
@@ -324,7 +325,7 @@ def transcribe_jobs(config, jobs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Transcribe new voice recordings into Markdown notes.")
-    parser.add_argument("--dry-run", action="store_true", help="list what would be transcribed, then stop")
+    parser.add_argument("--dry-run", action="store_true", help="list what would be transcribed and titled, then stop")
     parser.add_argument("--force", type=int, nargs="+", default=[], metavar="N",
                         help="transcribe these recording numbers again, beside their existing notes")
     args = parser.parse_args(argv)
@@ -348,12 +349,17 @@ def main(argv=None):
             print(f"Would transcribe {job.recording.name} -> {job.note.name}")
         if config.title_model_path:
             names = [p.name for p in config.notes_dir.glob("*.md")] + [job.note.name for job in jobs]
-            for name in untitled_notes(names, recordings):
+            names, missing = untitled_notes(names, recordings)
+            for name in names:
                 print(f"Would title {name}")
+            for name in missing:
+                print(f"Would leave {name} untitled: its recording isn't in AUDIO_IN_DIR")
         return 0
 
-    failures = transcribe_jobs(config, jobs) if jobs else []
-    if not jobs:
+    if jobs:
+        failures = transcribe_jobs(config, jobs)
+    else:
+        failures = []
         print("No new recordings to transcribe.")
     if config.title_model_path:
         title_untitled_notes(config, recordings)
