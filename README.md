@@ -13,7 +13,7 @@ poetry install
 poetry run python src/setup.py
 ```
 
-In `.env`, set `AUDIO_IN_DIR` (the recorder's folder) and `TEXT_OUT_DIR` (the notes folder). Leave `TITLE_MODEL_PATH` empty to skip titles.
+In `.env`, set `AUDIO_IN_DIR` (the recorder's folder) and `TEXT_OUT_DIR` (the notes folder). Leave `TITLE_MODEL_PATH` empty to skip titles. `NAMES_FILE` can point to a note of names and their misspellings, one `- Name: misspelling, misspelling` list item per line, which are fixed with plain find-and-replace.
 
 ## Run
 
@@ -21,4 +21,5 @@ In `.env`, set `AUDIO_IN_DIR` (the recorder's folder) and `TEXT_OUT_DIR` (the no
 poetry run python src/main.py              # transcribe new recordings, then title untitled notes
 poetry run python src/main.py --dry-run    # list what it would do
 poetry run python src/main.py --force 12   # transcribe recording 12 again, as "T12 (retranscribed).md"
+poetry run python src/main.py --fix-names  # fix the names in existing notes from NAMES_FILE
 ```

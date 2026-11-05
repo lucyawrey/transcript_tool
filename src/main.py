@@ -34,12 +34,19 @@ class ConfigError(Exception):
 
 
 @dataclass
+class Names:
+    pattern: re.Pattern
+    spellings: dict
+
+
+@dataclass
 class Config:
     audio_dir: Path
     notes_dir: Path
     model_path: Path
     pause_seconds: float
     title_model_path: Path | None
+    names: Names | None
 
 
 @dataclass
@@ -49,7 +56,7 @@ class Job:
     note: Path
 
 
-def load_config():
+def load_config(need_audio=True):
     def required_dir(key):
         value = os.environ.get(key)
         if not value:
@@ -59,7 +66,7 @@ def load_config():
             raise ConfigError(f"{key} is not a folder: {path}")
         return path
 
-    audio_dir = required_dir("AUDIO_IN_DIR")
+    audio_dir = required_dir("AUDIO_IN_DIR") if need_audio else None
     notes_dir = required_dir("TEXT_OUT_DIR")
     if not os.access(notes_dir, os.W_OK):
         raise ConfigError(f"TEXT_OUT_DIR is not writable: {notes_dir}")
@@ -70,13 +77,66 @@ def load_config():
         pause = float(os.environ.get("PARAGRAPH_PAUSE_SECONDS") or 3)
     except ValueError:
         raise ConfigError("PARAGRAPH_PAUSE_SECONDS must be a number of seconds")
-    if shutil.which("ffmpeg") is None:
+    if need_audio and shutil.which("ffmpeg") is None:
         raise ConfigError("ffmpeg is not installed or not on the PATH")
     title_model = os.environ.get("TITLE_MODEL_PATH")
     title_model_path = REPO_DIR / Path(title_model).expanduser() if title_model else None
-    if title_model_path and not title_model_path.is_file():
+    if need_audio and title_model_path and not title_model_path.is_file():
         raise ConfigError(f"TITLE_MODEL_PATH is not a file: {title_model_path}")
-    return Config(audio_dir, notes_dir, REPO_DIR / Path(model).expanduser(), pause, title_model_path)
+    names_file = os.environ.get("NAMES_FILE")
+    names_path = Path(names_file).expanduser() if names_file else None
+    if names_path and not names_path.is_file():
+        raise ConfigError(f"NAMES_FILE is not a file: {names_path}")
+    names = load_names(names_path) if names_path else None
+    return Config(audio_dir, notes_dir, REPO_DIR / Path(model).expanduser(), pause, title_model_path, names)
+
+
+def load_names(path):
+    spellings = {}
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line.startswith("- ") or ":" not in line:
+            continue
+        line = line.removeprefix("- ")
+        name, variants = (part.strip() for part in line.split(":", 1))
+        for variant in (variant.strip() for variant in variants.split(",")):
+            if not name or not variant:
+                continue
+            key = variant.lower()
+            if spellings.get(key, name) != name:
+                raise ConfigError(f"NAMES_FILE lists {variant!r} under both {spellings[key]} and {name}")
+            spellings[key] = name
+    if not spellings:
+        return None
+    alternation = "|".join(re.escape(variant) for variant in sorted(spellings, key=len, reverse=True))
+    return Names(re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE), spellings)
+
+
+def fix_names(text, names):
+    counts = Counter()
+
+    def replace(match):
+        name = names.spellings[match.group(0).lower()]
+        if match.group(0) != name:
+            counts[f"{match.group(0)} -> {name}"] += 1
+        return name
+    return names.pattern.sub(replace, text), counts
+
+
+def fix_existing_notes(config, dry_run):
+    notes = sorted((path for path in config.notes_dir.glob("*.md") if file_number(path.name) is not None),
+                   key=lambda path: file_number(path.name))
+    changed = 0
+    for path in notes:
+        fixed, counts = fix_names(path.read_text(encoding="utf-8"), config.names)
+        if not counts:
+            continue
+        changed += 1
+        replacements = ", ".join(f"{change} ({count})" for change, count in counts.items())
+        print(f"{'Would fix' if dry_run else 'Fixed'} {path.name}: {replacements}")
+        if not dry_run:
+            write_note_atomically(path, fixed)
+    print(f"{changed} note(s) {'would change' if dry_run else 'changed'}.")
 
 
 def file_number(name):
@@ -312,6 +372,8 @@ def transcribe_jobs(config, jobs):
                     if not same_words(note, full_text):
                         print("  Warning: word timings don't match the text; writing it without paragraphs")
                         note = full_text.strip() + "\n"
+                    if config.names:
+                        note, _ = fix_names(note, config.names)
                     write_note_atomically(job.note, note)
                 except Exception as error:
                     failures.append(f"{job.recording.name}: {error}")
@@ -328,9 +390,20 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="list what would be transcribed and titled, then stop")
     parser.add_argument("--force", type=int, nargs="+", default=[], metavar="N",
                         help="transcribe these recording numbers again, beside their existing notes")
+    parser.add_argument("--fix-names", action="store_true",
+                        help="fix the names in existing notes from NAMES_FILE, then stop")
     args = parser.parse_args(argv)
 
     load_dotenv()
+    if args.fix_names:
+        try:
+            config = load_config(need_audio=False)
+            if not config.names:
+                raise ConfigError("NAMES_FILE is not set in .env, or lists no names")
+        except ConfigError as error:
+            sys.exit(f"Error: {error}")
+        fix_existing_notes(config, args.dry_run)
+        return 0
     try:
         config = load_config()
         recordings, warnings = find_recordings(config.audio_dir)
