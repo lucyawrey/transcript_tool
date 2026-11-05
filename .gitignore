@@ -2,3 +2,6 @@
 .env
 .cache
 mlx_models
+models/
+__pycache__/
+.pytest_cache/
