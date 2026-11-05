@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,13 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 SAMPLE_RATE = 16000
 TARGET_PEAK_DB = -1.0
 MAX_PIECE_SECONDS = 20 * 60
+UNTITLED_PATTERN = re.compile(r"^T(\d+)\.md$")
+FORBIDDEN_IN_NAMES = re.compile(r'[\\/:*?"<>|#^\[\]\x00-\x1f\x7f]')
+TITLE_WORDS = 1500
+MIN_WORDS_TO_TITLE = 5
+MAX_TITLE_CHARS = 60
+TITLE_PROMPT = ("You name voice-note transcripts. Reply with a short title of 2 to 6 words that says what the "
+                "recording is about. Reply with the title only: no quotes, no dates, no ending punctuation.")
 
 
 class ConfigError(Exception):
@@ -29,6 +37,7 @@ class Config:
     notes_dir: Path
     model_path: Path
     pause_seconds: float
+    title_model_path: Path | None = None
 
 
 @dataclass
@@ -61,7 +70,11 @@ def load_config(env=os.environ):
         raise ConfigError("PARAGRAPH_PAUSE_SECONDS must be a number of seconds")
     if shutil.which("ffmpeg") is None:
         raise ConfigError("ffmpeg is not installed or not on the PATH")
-    return Config(audio_dir, notes_dir, REPO_DIR / Path(model).expanduser(), pause)
+    title_model = env.get("TITLE_MODEL_PATH")
+    title_model_path = REPO_DIR / Path(title_model).expanduser() if title_model else None
+    if title_model_path and not title_model_path.is_file():
+        raise ConfigError(f"TITLE_MODEL_PATH is not a file: {title_model_path}")
+    return Config(audio_dir, notes_dir, REPO_DIR / Path(model).expanduser(), pause, title_model_path)
 
 
 def file_number(name):
@@ -192,38 +205,95 @@ def transcribe(session, pcm, pause_seconds):
     return run_pieces(session, pcm, size_limited(pcm, bounds))
 
 
+def untitled_notes(note_names, recordings):
+    numbered = [name for name in note_names if file_number(name) is not None]
+    counts = {}
+    for name in numbered:
+        counts[file_number(name)] = counts.get(file_number(name), 0) + 1
+    untitled = []
+    for name in sorted(numbered, key=file_number):
+        match = UNTITLED_PATTERN.match(name)
+        if match and int(match.group(1)) in recordings and counts[int(match.group(1))] == 1:
+            untitled.append(name)
+    return untitled
+
+
+def ordinal(day):
+    suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def recording_date(recording):
+    date = datetime.fromtimestamp(recording.stat().st_mtime)
+    return f"{date:%B} {ordinal(date.day)} {date.year}"
+
+
+def clean_title(raw):
+    lines = raw.strip().splitlines()
+    title = FORBIDDEN_IN_NAMES.sub(" ", lines[0] if lines else "")
+    title = " ".join(title.split()).strip(" .'\u201c\u201d\u2018\u2019")
+    if len(title) > MAX_TITLE_CHARS:
+        title = title[:MAX_TITLE_CHARS + 1].rsplit(" ", 1)[0].rstrip(" .")
+    return title
+
+
+def title_notes(notes_dir, names, recordings, make_title):
+    renamed = 0
+    for name in names:
+        path = notes_dir / name
+        number = file_number(name)
+        try:
+            words = path.read_text(encoding="utf-8").split()
+            if len(words) < MIN_WORDS_TO_TITLE:
+                print(f"Left {name} untitled: too short to title")
+                continue
+            title = clean_title(make_title(" ".join(words[:TITLE_WORDS])))
+            if not title:
+                print(f"Left {name} untitled: the model gave no usable title")
+                continue
+            target = notes_dir / f"T{number} {recording_date(recordings[number])} {title} (auto).md"
+            if target.exists():
+                print(f"Left {name} untitled: {target.name} already exists")
+                continue
+            os.rename(path, target)
+            renamed += 1
+            print(f"Titled {name} -> {target.name}")
+        except Exception as error:
+            print(f"Left {name} untitled: {error}")
+    return renamed
+
+
+def load_titler(model_path):
+    from llama_cpp import Llama
+    llm = Llama(model_path=str(model_path), n_gpu_layers=-1, n_ctx=4096, verbose=False)
+
+    def make_title(text):
+        reply = llm.create_chat_completion(
+            messages=[{"role": "system", "content": TITLE_PROMPT}, {"role": "user", "content": text}],
+            temperature=0, max_tokens=24)
+        return reply["choices"][0]["message"]["content"]
+    return make_title
+
+
+def title_untitled_notes(config, recordings):
+    names = untitled_notes([p.name for p in config.notes_dir.glob("*.md")], recordings)
+    if not names:
+        return
+    try:
+        make_title = load_titler(config.title_model_path)
+    except Exception as error:
+        print(f"Titling skipped: the title model failed to load: {error}")
+        return
+    renamed = title_notes(config.notes_dir, names, recordings, make_title)
+    print(f"Titled {renamed} of {len(names)} untitled note(s).")
+
+
 def print_library_problem(level, message):
     if level in (2, 3):
         print(f"  {message.strip()}", file=sys.stderr)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Transcribe new voice recordings into Markdown notes.")
-    parser.add_argument("--dry-run", action="store_true", help="list what would be transcribed, then stop")
-    parser.add_argument("--force", type=int, nargs="+", default=[], metavar="N",
-                        help="transcribe these recording numbers again, beside their existing notes")
-    args = parser.parse_args(argv)
-
-    load_dotenv()
-    try:
-        config = load_config()
-        recordings, warnings = find_recordings(config.audio_dir)
-        jobs = plan_jobs(recordings, existing_note_numbers(config.notes_dir), config.notes_dir, args.force)
-        if jobs and not args.dry_run and not config.model_path.is_file():
-            raise ConfigError(f"MODEL_PATH is not a file: {config.model_path}")
-    except ConfigError as error:
-        sys.exit(f"Error: {error}")
-    for warning in warnings:
-        print(f"Warning: {warning}")
-
-    if not jobs:
-        print("No new recordings to transcribe.")
-        return 0
-    if args.dry_run:
-        for job in jobs:
-            print(f"Would transcribe {job.recording.name} -> {job.note.name}")
-        return 0
-
+def transcribe_jobs(config, jobs):
     failures = []
     with tempfile.TemporaryDirectory() as temp_dir:
         copies = [Path(shutil.copy2(job.recording, temp_dir)) for job in jobs]
@@ -248,6 +318,44 @@ def main(argv=None):
     print(f"\nDone: {len(jobs) - len(failures)} transcribed, {len(failures)} failed.")
     for failure in failures:
         print(f"  {failure}")
+    return failures
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Transcribe new voice recordings into Markdown notes.")
+    parser.add_argument("--dry-run", action="store_true", help="list what would be transcribed, then stop")
+    parser.add_argument("--force", type=int, nargs="+", default=[], metavar="N",
+                        help="transcribe these recording numbers again, beside their existing notes")
+    args = parser.parse_args(argv)
+
+    load_dotenv()
+    try:
+        config = load_config()
+        recordings, warnings = find_recordings(config.audio_dir)
+        jobs = plan_jobs(recordings, existing_note_numbers(config.notes_dir), config.notes_dir, args.force)
+        if jobs and not args.dry_run and not config.model_path.is_file():
+            raise ConfigError(f"MODEL_PATH is not a file: {config.model_path}")
+    except ConfigError as error:
+        sys.exit(f"Error: {error}")
+    for warning in warnings:
+        print(f"Warning: {warning}")
+
+    if args.dry_run:
+        if not jobs:
+            print("No new recordings to transcribe.")
+        for job in jobs:
+            print(f"Would transcribe {job.recording.name} -> {job.note.name}")
+        if config.title_model_path:
+            names = [p.name for p in config.notes_dir.glob("*.md")] + [job.note.name for job in jobs]
+            for name in untitled_notes(names, recordings):
+                print(f"Would title {name}")
+        return 0
+
+    failures = transcribe_jobs(config, jobs) if jobs else []
+    if not jobs:
+        print("No new recordings to transcribe.")
+    if config.title_model_path:
+        title_untitled_notes(config, recordings)
     return 1 if failures else 0
 
 

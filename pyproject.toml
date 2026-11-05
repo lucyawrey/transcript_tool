@@ -9,7 +9,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "dotenv (>=0.9.9,<0.10.0)",
-    "transcribe-cpp (==0.4.1)"
+    "transcribe-cpp (==0.4.1)",
+    "llama-cpp-python (==0.3.36)"
 ]
 
 [dependency-groups]
@@ -20,6 +21,17 @@ pythonpath = ["src"]
 
 [tool.poetry]
 package-mode = false
+
+[tool.poetry.dependencies]
+llama-cpp-python = [
+    {version = "0.3.36", source = "llama-cpp-vulkan", markers = "sys_platform == 'linux'"},
+    {version = "0.3.36", source = "PyPI", markers = "sys_platform != 'linux'"},
+]
+
+[[tool.poetry.source]]
+name = "llama-cpp-vulkan"
+url = "https://abetlen.github.io/llama-cpp-python/whl/vulkan"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
