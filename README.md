@@ -1,8 +1,8 @@
 # Transcript Tool
 
-A quick python script made for bulk transcribing audio files off of my audio recorder.
+A python script for bulk transcribing audio files off of my audio recorder.
 
-Recordings become notes named `T<number>.md`, transcribed locally with [Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2). Optionally, [Qwen3 4B](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) names untitled notes, for example `T28 November 15th 2025 Test Transcription Script (auto).md`; it never changes the text.
+Recordings are transcribed locally. The current model is [Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2). Optionally, [Qwen3 4B](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) can be enable to automatically name untitled notes. LLMs never clean up the text as the intention of this project is raw transcriptions of real human speech.
 
 ## Setup
 
