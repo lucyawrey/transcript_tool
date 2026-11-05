@@ -47,7 +47,8 @@ class Job:
     note: Path
 
 
-def load_config(env=os.environ):
+def load_config():
+    env = os.environ
     def required_dir(key):
         value = env.get(key)
         if not value:
@@ -162,8 +163,8 @@ def decode(recording):
     return pcm
 
 
-def split_points(pcm, max_samples=None):
-    max_samples = max_samples or MAX_PIECE_SECONDS * SAMPLE_RATE
+def split_points(pcm):
+    max_samples = MAX_PIECE_SECONDS * SAMPLE_RATE
     def cut(start, end):
         if end - start <= max_samples:
             return []

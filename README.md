@@ -58,10 +58,3 @@ Settings are read from `.env`:
 
 - `--dry-run` lists what would be transcribed and titled, and writes nothing.
 - `--force N [N ...]` transcribes those recording numbers again. The new note is written beside the existing one, as `T<n> (retranscribed).md` (or `(retranscribed 2)` and so on), so no note is ever overwritten.
-
-## Tests
-
-```sh
-poetry install --with dev
-poetry run pytest
-```
