@@ -10,12 +10,7 @@ Install Poetry and ffmpeg, then:
 
 ```sh
 poetry install
-mkdir -p models
-curl -L -o models/parakeet-tdt-0.6b-v2-F16.gguf \
-    https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/main/parakeet-tdt-0.6b-v2-F16.gguf
-curl -L -o models/qwen3-4b-instruct-2507-Q5_K_M.gguf \
-    https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q5_K_M.gguf
-cp .env.template .env
+poetry run python src/setup.py
 ```
 
 In `.env`, set `AUDIO_IN_DIR` (the recorder's folder) and `TEXT_OUT_DIR` (the notes folder). Leave `TITLE_MODEL_PATH` empty to skip titles.
